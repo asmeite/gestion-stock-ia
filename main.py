@@ -179,11 +179,11 @@ elif mode == "📄 Tous les produits (automatique)":
         to_insert["prediction_date"] = to_insert["date"] + pd.Timedelta(days=1)
         to_insert["prediction_method"] = "XGBoost"
         
+
         # Calcul des indicateurs supplémentaires
         to_insert["coverage_rate"] = to_insert["available_stock"] / to_insert["predicted_units_sold"].replace(0, 1)
         to_insert["reorder_quantity"] = (to_insert["predicted_units_sold"] - to_insert["available_stock"]).clip(lower=0).astype(int)
         to_insert["is_critical_stock"] = to_insert["available_stock"] < to_insert["predicted_units_sold"]
-
 
         engine = create_engine(
             f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode={sslmode}"
