@@ -1,141 +1,192 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import matplotlib.pyplot as plt
 import joblib
-from datetime import datetime, timedelta
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from datetime import date
+from sqlalchemy import create_engine
+import os
+import streamlit.components.v1 as components
 
-# Configuration de la page
-st.set_page_config(page_title="Prévision IA & Actions", layout="wide")
+# CHARGER MODELE ET ENCODEUR
+model = joblib.load("models/xgb_model.pkl")
+encoder = joblib.load("models/ordinal_encoder.pkl")
 
-@st.cache_data
-def load_data():
-    return pd.read_csv("data/simulated_sales_data_en.csv", parse_dates=["Date"])
+# VALEURS FIXES
+categories = ['Beverages', 'Bakery', 'Produce', 'Dairy', 'Snacks']
+subcategories = {
+    'Beverages': ['Soda', 'Juice', 'Water'],
+    'Bakery': ['Bread', 'Croissant', 'Cake'],
+    'Produce': ['Apple', 'Banana', 'Carrot'],
+    'Dairy': ['Milk', 'Cheese', 'Yogurt'],
+    'Snacks': ['Chips', 'Chocolate', 'Cookies']
+}
+weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+seasons = ['Winter', 'Spring', 'Summer', 'Autumn']
 
-# Chargement données et modèle
-df = load_data()
-model = joblib.load("models/model_global.pkl")
-encoder = joblib.load("models/product_encoder.pkl")
+# TITRE & MODE
+st.title("📦 Prédiction de la Demande avec XGBoost")
+mode = st.radio("Choisissez un mode de prédiction :", ("👭 Produit spécifique (manuel)", "📄 Tous les produits (automatique)"))
 
-st.sidebar.title("🛠 Configuration")
-selected_product = st.sidebar.selectbox("Produit", df["Product"].unique())
-page = st.sidebar.radio("🔖 Pages", [
-    "Comparaison IA vs Classique",
-    "Analyse du modèle",
-    "Conséquences & Recommandations"
-])
+# MODE MANUEL
+if mode == "👭 Produit spécifique (manuel)":
+    selected_date = st.date_input("Date", value=date.today())
+    product_category = st.selectbox("Catégorie du produit", categories)
+    product_subcategory = st.selectbox("Sous-catégorie", subcategories[product_category])
+    weekday = st.selectbox("Jour de la semaine", weekdays)
+    season = st.selectbox("Saison", seasons)
 
-hist = df[df["Product"] == selected_product].sort_values("Date")
-code = encoder.transform([selected_product])[0]
-last_date = hist["Date"].max()
-last_rows = hist.tail(3)
+    unit_price = st.number_input("Prix unitaire (€)", min_value=0.1, value=5.0)
+    available_stock = st.number_input("Stock disponible", min_value=0, value=100)
+    supplier_lead_time = st.slider("Délai fournisseur (jours)", 1, 30, 7)
+    on_promotion = st.checkbox("Produit en promotion")
+    is_holiday = st.checkbox("Jour férié")
+    temperature = st.slider("Température (°C)", -10.0, 40.0, 20.0)
+    rainfall = st.slider("Pluviométrie (mm)", 0.0, 50.0, 5.0)
 
-future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=7)
-future = pd.DataFrame({
-    "Date": future_dates,
-    "Product_Code": code,
-    "Day_of_Week": [(d.weekday() + 1) for d in future_dates],
-    "External_Temperature": hist["External_Temperature"].mean(),
-    "Promotion_Active": 0,
-    "Sales_Lag_1": last_rows["Daily_Sales"].iloc[-1],
-    "Sales_Lag_2": last_rows["Daily_Sales"].iloc[-2],
-    "Sales_Lag_3": last_rows["Daily_Sales"].iloc[-3],
-})
-X_f = future[[
-    "Product_Code", "Day_of_Week", "External_Temperature",
-    "Promotion_Active", "Sales_Lag_1", "Sales_Lag_2", "Sales_Lag_3"
-]]
-future["IA"] = model.predict(X_f)
-ma = hist["Daily_Sales"].rolling(window=7).mean().iloc[-1]
-future["Classique"] = ma
+    lag_1 = st.number_input("Units sold 1 jour avant", min_value=0, value=20)
+    lag_2 = st.number_input("Units sold 2 jours avant", min_value=0, value=20)
+    lag_3 = st.number_input("Units sold 3 jours avant", min_value=0, value=20)
 
-current_stock = hist["Current_Stock"].iloc[-1]
-dmd_7j = future["IA"].sum()
-to_order = max(0, int(dmd_7j - current_stock))
+    rolling_mean = np.mean([lag_1, lag_2, lag_3])
+    rolling_std = np.std([lag_1, lag_2, lag_3])
+    rolling_min = np.min([lag_1, lag_2, lag_3])
+    rolling_max = np.max([lag_1, lag_2, lag_3])
+    trend = lag_1 - rolling_mean
 
-st.title("📦 Prévision de la demande et recommandations")
+    month = selected_date.month
+    year = selected_date.year
+    day = selected_date.day
+    week = selected_date.isocalendar()[1]
+    is_weekend = 1 if weekday in ['Saturday', 'Sunday'] else 0
+    price_per_stock = unit_price / (available_stock + 1)
+    promo_and_holiday = int(on_promotion and is_holiday)
 
-if page == "Comparaison IA vs Classique":
-    st.header("🔍 1) Comparaison IA vs Moyenne Mobile")
-
-    st.subheader("⚙️ Scénario What-If")
-    p_promo = st.selectbox("Promo active ?", [0, 1])
-    p_temp = st.slider(
-        "Température (°C)",
-        int(df["External_Temperature"].min()),
-        int(df["External_Temperature"].max()),
-        int(df["External_Temperature"].mean()),
-        step=1
-    )
-    p_day = st.slider("Jour de semaine", 1, 7, 1, step=1)
-
-    X_sc = pd.DataFrame([{
-        "Product_Code": code,
-        "Day_of_Week": p_day,
-        "External_Temperature": p_temp,
-        "Promotion_Active": p_promo,
-        "Sales_Lag_1": last_rows["Daily_Sales"].iloc[-1],
-        "Sales_Lag_2": last_rows["Daily_Sales"].iloc[-2],
-        "Sales_Lag_3": last_rows["Daily_Sales"].iloc[-3],
+    input_df = pd.DataFrame([{
+        "product_category": product_category,
+        "product_subcategory": product_subcategory,
+        "weekday": weekday,
+        "season": season,
+        "unit_price": unit_price,
+        "available_stock": available_stock,
+        "supplier_lead_time_days": supplier_lead_time,
+        "on_promotion": int(on_promotion),
+        "is_holiday": int(is_holiday),
+        "temperature_c": temperature,
+        "rainfall_mm": rainfall,
+        "month": month,
+        "year": year,
+        "day": day,
+        "week": week,
+        "is_weekend": is_weekend,
+        "price_per_stock": price_per_stock,
+        "promo_and_holiday": promo_and_holiday,
+        "units_sold_lag_1": lag_1,
+        "units_sold_lag_2": lag_2,
+        "units_sold_lag_3": lag_3,
+        "units_sold_avg_3": rolling_mean,
+        "units_sold_rolling_mean_3": rolling_mean,
+        "units_sold_rolling_std_3": rolling_std,
+        "units_sold_rolling_min_3": rolling_min,
+        "units_sold_rolling_max_3": rolling_max,
+        "units_sold_trend_3": trend
     }])
-    ia_sc = model.predict(X_sc)[0]
 
-    st.markdown(f"- **Prévision IA** (scénario) : **{ia_sc:.0f}** unités")
-    st.markdown(f"- **Moyenne mobile**       : **{ma:.0f}** unités")
+    if st.button("📈 Prédire la demande"):
+        cat_input = encoder.transform(input_df[["product_category", "product_subcategory", "weekday", "season"]])
+        num_input = input_df.drop(columns=["product_category", "product_subcategory", "weekday", "season"]).values
+        final_input = np.hstack([cat_input, num_input])
+        prediction = model.predict(final_input)[0]
+        st.success(f"📊 Prévision : {prediction:.2f} unités vendues")
 
-    st.subheader("📋 Prévisions comparées (7 jours)")
-    st.dataframe(future[["Date", "Classique", "IA"]])
+elif mode == "📄 Tous les produits (automatique)":
+    st.info("Chargement des dernières lignes connues depuis Azure (PostgreSQL)...")
 
-    fig = px.line(
-        future, x="Date",
-        y=["Classique", "IA"],
-        title=f"Comparaison prévisions pour {selected_product}",
-        labels={"value": "Ventes", "variable": "Méthode"},
-        markers=True
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    if st.button("⚡ Générer les prévisions"):
+        db_user = st.secrets["postgres"]["user"]
+        db_password = st.secrets["postgres"]["password"]
+        db_host = st.secrets["postgres"]["host"]
+        db_port = st.secrets["postgres"]["port"]
+        db_name = st.secrets["postgres"]["dbname"]
+        sslmode = st.secrets["postgres"].get("sslmode", "require") 
 
-elif page == "Analyse du modèle":
-    st.header("📊 2) Analyse du modèle IA")
+        engine = create_engine(
+            f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode={sslmode}"
+        )
+        query = "SELECT * FROM simulated_sales"
+        df = pd.read_sql(query, engine, parse_dates=["date"])
 
-    rmse = 9.34
-    r2   = 0.87
-    st.markdown("**Performances du modèle global :**")
-    st.write(f"- RMSE : **{rmse:.2f}**")
-    st.write(f"- R²   : **{r2:.2f}**")
-    
-    st.subheader("📈 Prédiction IA vs Réel")
-    st.image("plots/prediction_vs_reel.png",)
+        df["month"] = df["date"].dt.month
+        df["year"] = df["date"].dt.year
+        df["day"] = df["date"].dt.day
+        df["week"] = df["date"].dt.isocalendar().week
+        df["is_weekend"] = df["weekday"].isin(["Saturday", "Sunday"]).astype(int)
+        df["price_per_stock"] = df["unit_price"] / (df["available_stock"] + 1)
+        df["promo_and_holiday"] = df["on_promotion"] & df["is_holiday"]
 
-    st.subheader("📊 Réel vs Prédit")
-    st.image("plots/reel_vs_predit.png")
+        df = df.sort_values(by=["product_category", "product_subcategory", "date"])
+        df["units_sold_lag_1"] = df.groupby(["product_category", "product_subcategory"])['units_sold'].shift(1)
+        df["units_sold_lag_2"] = df.groupby(["product_category", "product_subcategory"])['units_sold'].shift(2)
+        df["units_sold_lag_3"] = df.groupby(["product_category", "product_subcategory"])['units_sold'].shift(3)
+        df["units_sold_avg_3"] = df[["units_sold_lag_1", "units_sold_lag_2", "units_sold_lag_3"]].mean(axis=1)
+        df["units_sold_rolling_mean_3"] = df.groupby(["product_category", "product_subcategory"])["units_sold"].transform(lambda x: x.rolling(window=3).mean())
+        df["units_sold_rolling_std_3"] = df.groupby(["product_category", "product_subcategory"])["units_sold"].transform(lambda x: x.rolling(window=3).std())
+        df["units_sold_rolling_min_3"] = df.groupby(["product_category", "product_subcategory"])["units_sold"].transform(lambda x: x.rolling(window=3).min())
+        df["units_sold_rolling_max_3"] = df.groupby(["product_category", "product_subcategory"])["units_sold"].transform(lambda x: x.rolling(window=3).max())
+        df["units_sold_trend_3"] = df["units_sold_lag_1"] - df["units_sold_rolling_mean_3"]
 
-elif page == "Conséquences & Recommandations":
-    st.header("⚙️ 3) Conséquences et recommandations")
+        df_latest = df.sort_values("date").groupby(["product_category", "product_subcategory"]).tail(1)
+        df_latest = df_latest.dropna()
 
-    st.markdown(f"- Stock actuel : **{current_stock}** unités")
-    st.markdown(f"- Demande IA 7 jours : **{dmd_7j:.0f}** unités")
+        categorical_cols = ["product_category", "product_subcategory", "weekday", "season"]
+        numerical_cols = [
+            "unit_price", "available_stock", "supplier_lead_time_days",
+            "on_promotion", "is_holiday", "temperature_c", "rainfall_mm",
+            "month", "year", "day", "week", "is_weekend", "price_per_stock", "promo_and_holiday",
+            "units_sold_lag_1", "units_sold_lag_2", "units_sold_lag_3", "units_sold_avg_3",
+            "units_sold_rolling_mean_3", "units_sold_rolling_std_3", "units_sold_rolling_min_3",
+            "units_sold_rolling_max_3", "units_sold_trend_3"
+        ]
 
-    avg_daily = dmd_7j / 7
-    cover_days = current_stock / avg_daily if avg_daily>0 else np.nan
-    st.metric("📅 Couverture (jours)", f"{cover_days:.1f}")
+        X_cat = encoder.transform(df_latest[categorical_cols])
+        X_num = df_latest[numerical_cols].values
+        final_input = np.hstack([X_cat, X_num])
+        preds = model.predict(final_input)
+        df_latest["units_sold_predicted"] = preds
 
-    stock = current_stock
-    dmd7  = dmd_7j
+        st.subheader("📋 Récapitulatif des données à prédire")
+        st.write(f"Nombre total de produits : {df_latest.shape[0]}")
+        st.write(f"Période des données : {df_latest['date'].min().date()} ➡️ {df_latest['date'].max().date()}")
+        st.write("Produits par catégorie :")
+        st.dataframe(df_latest["product_category"].value_counts().reset_index().rename(columns={"index": "Catégorie", "product_category": "Nombre de produits"}))
+        st.success(f"✅ {len(preds)} prédictions générées sur les lignes les plus récentes de chaque produit !")
 
-    coverage = stock / dmd7 if dmd7>0 else 0
-    coverage_pct = coverage * 100
-    risk_pct = max(0, 100 - coverage_pct)
+        to_insert = df_latest[
+            [
+                "date", "product_subcategory", "product_category", "weekday", "season",
+                "unit_price", "available_stock", "supplier_lead_time_days",
+                "on_promotion", "is_holiday", "temperature_c", "rainfall_mm",
+                "price_per_stock", "promo_and_holiday",
+                "units_sold_lag_1", "units_sold_lag_2", "units_sold_lag_3", "units_sold_avg_3",
+                "units_sold_rolling_mean_3", "units_sold_rolling_std_3",
+                "units_sold_rolling_min_3", "units_sold_rolling_max_3", "units_sold_trend_3",
+                "units_sold_predicted"
+            ]
+        ].copy()
+        to_insert = to_insert.rename(columns={
+            "product_subcategory": "product",
+            "units_sold_predicted": "predicted_units_sold"
+        })
+        to_insert["prediction_date"] = to_insert["date"] + pd.Timedelta(days=1)
+        to_insert["prediction_method"] = "XGBoost"
 
-    st.metric("📊 Taux de couverture (%)", f"{coverage_pct:.0f}%")
-    st.metric("⚠️ Risque de rupture (%)", f"{risk_pct:.0f}%")
-    
-    if to_order > 0:
-        st.error(f"⚠️ Commander **{to_order}** unités")
-    else:
-        st.success("✅ Stock suffisant")
+        engine = create_engine(
+            f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode={sslmode}"
+        )
+        try:
+            to_insert.to_sql("forecasts", engine, if_exists="append", index=False)
+        except Exception as e:
+            st.error(f"Erreur lors de l'insertion : {e}")
 
-
+    st.header("📊 Suivi des stocks & Recommandations via Power BI")
+    powerbi_url = "https://app.powerbi.com/links/2j-oNtN4Zx?ctid=108bc864-cdf5-4ec3-8b7c-4eb06be1b41d&pbi_source=linkShare"
+    st.link_button("Accéder au rapport Power BI", powerbi_url)
